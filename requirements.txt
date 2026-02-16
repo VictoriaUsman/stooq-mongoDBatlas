@@ -1,0 +1,5 @@
+flask
+pymongo[srv]
+requests
+gunicorn
+certifi

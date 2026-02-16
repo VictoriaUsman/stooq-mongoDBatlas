@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stooq Price Viewer</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f0f2f5; color: #333; }
+        .container { max-width: 960px; margin: 40px auto; padding: 0 20px; }
+        h1 { text-align: center; margin-bottom: 24px; font-size: 1.8rem; }
+        .card { background: #fff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 20px; }
+        .search-wrap { position: relative; }
+        #search { width: 100%; padding: 12px 16px; font-size: 1rem; border: 2px solid #ddd; border-radius: 8px; outline: none; }
+        #search:focus { border-color: #4a90d9; }
+        #dropdown { position: absolute; top: 100%; left: 0; right: 0; background: #fff; border: 1px solid #ddd; border-top: none; border-radius: 0 0 8px 8px; max-height: 240px; overflow-y: auto; display: none; z-index: 10; }
+        #dropdown div { padding: 10px 16px; cursor: pointer; }
+        #dropdown div:hover { background: #e8f0fe; }
+        .range-buttons { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+        .range-buttons button { padding: 6px 16px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer; font-size: 0.9rem; }
+        .range-buttons button.active { background: #4a90d9; color: #fff; border-color: #4a90d9; }
+        #chart-title { font-size: 1.2rem; font-weight: 600; margin-bottom: 12px; }
+        #no-data { display: none; text-align: center; color: #888; padding: 40px; }
+        .pipeline-wrap { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
+        .pipeline-btn { padding: 10px 20px; font-size: 0.95rem; border: none; border-radius: 8px; color: #fff; cursor: pointer; font-weight: 600; }
+        .pipeline-btn:disabled { background: #aaa; cursor: not-allowed; }
+        #run-ticker { background: #4a90d9; }
+        #run-ticker:hover:not(:disabled) { background: #3a7bc8; }
+        #run-all { background: #34a853; }
+        #run-all:hover:not(:disabled) { background: #2d8f47; }
+        #pipeline-status { font-size: 0.9rem; color: #555; }
+        .fetch-range { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+        .fetch-range label { font-size: 0.85rem; font-weight: 600; color: #555; }
+        .fetch-range button { padding: 5px 12px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer; font-size: 0.85rem; }
+        .fetch-range button.active { background: #4a90d9; color: #fff; border-color: #4a90d9; }
+        .fetch-range input[type="date"] { padding: 4px 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 0.85rem; }
+        #pipeline-stats { display: none; margin-top: 12px; padding: 12px 16px; background: #f8f9fa; border-radius: 8px; border: 1px solid #e0e0e0; font-size: 0.85rem; line-height: 1.6; }
+        #pipeline-stats.success { border-color: #34a853; background: #e6f4ea; }
+        #pipeline-stats.error { border-color: #ea4335; background: #fce8e6; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Stooq Price Viewer</h1>
+        <div class="card">
+            <div class="search-wrap">
+                <input type="text" id="search" placeholder="Search ticker (e.g. AAPL)" autocomplete="off">
+                <div id="dropdown"></div>
+            </div>
+            <div class="fetch-range">
+                <label>Fetch range:</label>
+                <button class="range-opt active" data-days="1">1D</button>
+                <button class="range-opt" data-days="7">1W</button>
+                <button class="range-opt" data-days="30">1M</button>
+                <button class="range-opt" data-days="365">1Y</button>
+                <button class="range-opt" data-days="1825">5Y</button>
+                <button class="range-opt" data-days="custom">Custom</button>
+                <span id="custom-dates" style="display:none;">
+                    <input type="date" id="date-from"> to <input type="date" id="date-to">
+                </span>
+            </div>
+            <div class="pipeline-wrap">
+                <button id="run-ticker" class="pipeline-btn" disabled>Fetch Ticker</button>
+                <button id="run-all" class="pipeline-btn">Fetch All S&P 500</button>
+                <span id="pipeline-status"></span>
+            </div>
+            <div id="pipeline-stats"></div>
+        </div>
+        <div class="card" id="chart-card" style="display:none;">
+            <div id="chart-title"></div>
+            <div class="range-buttons">
+                <button data-days="30">1M</button>
+                <button data-days="90">3M</button>
+                <button data-days="180">6M</button>
+                <button data-days="365" class="active">1Y</button>
+                <button data-days="1825">5Y</button>
+            </div>
+            <canvas id="chart"></canvas>
+            <div id="no-data">No price data available for this ticker.</div>
+        </div>
+    </div>
+    <script>
+        const searchInput = document.getElementById('search');
+        const dropdown = document.getElementById('dropdown');
+        const chartCard = document.getElementById('chart-card');
+        const chartTitle = document.getElementById('chart-title');
+        const noData = document.getElementById('no-data');
+        const canvas = document.getElementById('chart');
+        let debounceTimer = null;
+        let currentTicker = null;
+        let chart = null;
+
+        searchInput.addEventListener('input', () => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(doSearch, 300);
+            const val = searchInput.value.trim().toUpperCase();
+            if (val.length > 0 && /^[A-Z.]{1,10}$/.test(val)) {
+                currentTicker = val;
+                runTickerBtn.disabled = false;
+                runTickerBtn.textContent = 'Fetch ' + val;
+            } else {
+                runTickerBtn.disabled = true;
+                runTickerBtn.textContent = 'Fetch Ticker';
+            }
+        });
+
+        async function doSearch() {
+            const q = searchInput.value.trim();
+            if (q.length === 0) { dropdown.style.display = 'none'; return; }
+            const resp = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+            const tickers = await resp.json();
+            dropdown.innerHTML = '';
+            if (tickers.length === 0) { dropdown.style.display = 'none'; return; }
+            tickers.forEach(t => {
+                const d = document.createElement('div');
+                d.textContent = t;
+                d.onclick = () => selectTicker(t);
+                dropdown.appendChild(d);
+            });
+            dropdown.style.display = 'block';
+        }
+
+        function selectTicker(ticker) {
+            currentTicker = ticker;
+            searchInput.value = ticker;
+            dropdown.style.display = 'none';
+            chartCard.style.display = 'block';
+            chartTitle.textContent = ticker + ' — Closing Price';
+            loadChart(365);
+            document.querySelectorAll('.range-buttons button').forEach(b => {
+                b.classList.toggle('active', b.dataset.days === '365');
+            });
+            document.getElementById('run-ticker').disabled = false;
+            document.getElementById('run-ticker').textContent = 'Fetch ' + ticker;
+        }
+
+        document.querySelectorAll('.range-buttons button').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (!currentTicker) return;
+                document.querySelectorAll('.range-buttons button').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                loadChart(parseInt(btn.dataset.days));
+            });
+        });
+
+        async function loadChart(days) {
+            const resp = await fetch(`/api/prices/${currentTicker}?days=${days}`);
+            const data = await resp.json();
+            if (data.length === 0) {
+                canvas.style.display = 'none';
+                noData.style.display = 'block';
+                return;
+            }
+            canvas.style.display = 'block';
+            noData.style.display = 'none';
+            const labels = data.map(d => d.date);
+            const prices = data.map(d => d.close);
+            if (chart) chart.destroy();
+            chart = new Chart(canvas, {
+                type: 'line',
+                data: {
+                    labels,
+                    datasets: [{
+                        label: 'Close',
+                        data: prices,
+                        borderColor: '#4a90d9',
+                        backgroundColor: 'rgba(74,144,217,0.1)',
+                        fill: true,
+                        tension: 0.1,
+                        pointRadius: 0,
+                        borderWidth: 2,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { ticks: { maxTicksLimit: 12 } },
+                        y: { ticks: { callback: v => '$' + v.toFixed(2) } }
+                    }
+                }
+            });
+        }
+
+        document.addEventListener('click', e => {
+            if (!e.target.closest('.search-wrap')) dropdown.style.display = 'none';
+        });
+
+        const runTickerBtn = document.getElementById('run-ticker');
+        const runAllBtn = document.getElementById('run-all');
+        const pipelineStatus = document.getElementById('pipeline-status');
+        const pipelineStats = document.getElementById('pipeline-stats');
+        const customDates = document.getElementById('custom-dates');
+        const dateFrom = document.getElementById('date-from');
+        const dateTo = document.getElementById('date-to');
+        let fetchDays = 1;
+        let lastFetchedTickers = null;
+
+        document.querySelectorAll('.range-opt').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.range-opt').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                if (btn.dataset.days === 'custom') {
+                    customDates.style.display = 'inline';
+                    fetchDays = 'custom';
+                } else {
+                    customDates.style.display = 'none';
+                    fetchDays = parseInt(btn.dataset.days);
+                }
+            });
+        });
+
+        function startPipeline(tickers) {
+            lastFetchedTickers = tickers;
+            runTickerBtn.disabled = true;
+            runAllBtn.disabled = true;
+            pipelineStatus.textContent = 'Starting pipeline...';
+            pipelineStats.style.display = 'none';
+            pipelineStats.className = '';
+
+            const body = {};
+            if (tickers) body.tickers = tickers;
+
+            if (fetchDays === 'custom') {
+                if (!dateFrom.value || !dateTo.value) {
+                    pipelineStatus.textContent = 'Please select both dates.';
+                    runTickerBtn.disabled = !currentTicker;
+                    runAllBtn.disabled = false;
+                    return;
+                }
+                body.start_date = dateFrom.value.replace(/-/g, '');
+                body.end_date = dateTo.value.replace(/-/g, '');
+            } else {
+                body.days = fetchDays;
+            }
+
+            fetch('/api/pipeline', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'already_running') {
+                        pipelineStatus.textContent = 'Pipeline is already running.';
+                    } else {
+                        pipelineStatus.textContent = tickers ? `Fetching ${tickers.join(', ')}...` : 'Fetching all S&P 500...';
+                        pollPipeline();
+                    }
+                });
+        }
+
+        runTickerBtn.addEventListener('click', () => {
+            if (currentTicker) startPipeline([currentTicker]);
+        });
+
+        runAllBtn.addEventListener('click', () => {
+            startPipeline(null);
+        });
+
+        function pollPipeline() {
+            const interval = setInterval(async () => {
+                const resp = await fetch('/api/pipeline/status');
+                const data = await resp.json();
+                if (!data.running) {
+                    clearInterval(interval);
+                    runAllBtn.disabled = false;
+                    if (currentTicker) {
+                        runTickerBtn.disabled = false;
+                    }
+                    if (data.last_result === 'success' && data.stats) {
+                        const s = data.stats;
+                        pipelineStatus.textContent = 'Pipeline complete!';
+                        pipelineStats.innerHTML =
+                            `<strong>Date range:</strong> ${s.date_range}<br>` +
+                            `<strong>Tickers fetched:</strong> ${s.tickers_fetched} / ${s.tickers_requested}<br>` +
+                            `<strong>Records parsed:</strong> ${s.records_parsed}<br>` +
+                            `<strong>Inserted:</strong> ${s.records_inserted} &nbsp; <strong>Updated:</strong> ${s.records_updated}`;
+                        pipelineStats.className = 'success';
+                        pipelineStats.style.display = 'block';
+                        if (lastFetchedTickers && lastFetchedTickers.length === 1) {
+                            selectTicker(lastFetchedTickers[0]);
+                        }
+                    } else {
+                        pipelineStatus.textContent = 'Error';
+                        pipelineStats.textContent = data.last_result;
+                        pipelineStats.className = 'error';
+                        pipelineStats.style.display = 'block';
+                    }
+                }
+            }, 3000);
+        }
+    </script>
+</body>
+</html>
